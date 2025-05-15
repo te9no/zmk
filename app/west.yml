@@ -10,7 +10,6 @@ manifest:
     - name: zephyr
       # Use fork of ZMK's Zephyr version that cherry-picks the child node fix from v3.7.
       remote: urob
-      remote: zmkfirmware
       revision: v3.5.0+zmk-fixes
       clone-depth: 1
       import:
