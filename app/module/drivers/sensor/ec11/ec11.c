@@ -20,21 +20,26 @@
 
 LOG_MODULE_REGISTER(EC11, CONFIG_SENSOR_LOG_LEVEL);
 
-static int ec11_get_ab_state(const struct device *dev) {
+int ec11_get_ab_state(const struct device *dev) {
     const struct ec11_config *drv_cfg = dev->config;
+    int a = gpio_pin_get_dt(&drv_cfg->a);
+    int b = gpio_pin_get_dt(&drv_cfg->b);
 
-    return (gpio_pin_get_dt(&drv_cfg->a) << 1) | gpio_pin_get_dt(&drv_cfg->b);
+    if (a < 0) {
+        return a;
+    }
+
+    if (b < 0) {
+        return b;
+    }
+
+    return ((a > 0) << 1) | (b > 0);
 }
 
-static int ec11_sample_fetch(const struct device *dev, enum sensor_channel chan) {
+int ec11_update_ab_state(const struct device *dev, uint8_t val) {
     struct ec11_data *drv_data = dev->data;
     const struct ec11_config *drv_cfg = dev->config;
-    uint8_t val;
     int8_t delta;
-
-    __ASSERT_NO_MSG(chan == SENSOR_CHAN_ALL || chan == SENSOR_CHAN_ROTATION);
-
-    val = ec11_get_ab_state(dev);
 
     LOG_DBG("prev: %d, new: %d", drv_data->ab_state, val);
 
@@ -69,6 +74,40 @@ static int ec11_sample_fetch(const struct device *dev, enum sensor_channel chan)
         drv_data->delta = delta;
         drv_data->pulses %= drv_cfg->resolution;
     }
+
+    return delta;
+}
+
+static int ec11_sample_fetch(const struct device *dev, enum sensor_channel chan) {
+    const struct ec11_config *drv_cfg = dev->config;
+    int val;
+
+    __ASSERT_NO_MSG(chan == SENSOR_CHAN_ALL || chan == SENSOR_CHAN_ROTATION);
+
+    if (IS_ENABLED(CONFIG_EC11_SAMPLE_FETCH_READ_A_ONLY)) {
+        (void)gpio_pin_get_dt(&drv_cfg->a);
+        return 0;
+    }
+
+    if (IS_ENABLED(CONFIG_EC11_SAMPLE_FETCH_READ_B_ONLY)) {
+        (void)gpio_pin_get_dt(&drv_cfg->b);
+        return 0;
+    }
+
+    if (IS_ENABLED(CONFIG_EC11_TRIGGER_POLLING)) {
+        return 0;
+    }
+
+    val = ec11_get_ab_state(dev);
+    if (val < 0) {
+        return val;
+    }
+
+    if (IS_ENABLED(CONFIG_EC11_SAMPLE_FETCH_READ_ONLY)) {
+        return 0;
+    }
+
+    (void)ec11_update_ab_state(dev, (uint8_t)val);
 
     return 0;
 }
@@ -142,7 +181,15 @@ int ec11_init(const struct device *dev) {
     }
 #endif
 
-    drv_data->ab_state = ec11_get_ab_state(dev);
+    int ab_state = ec11_get_ab_state(dev);
+    if (ab_state < 0) {
+        return ab_state;
+    }
+
+    drv_data->ab_state = (uint8_t)ab_state;
+#ifdef CONFIG_EC11_TRIGGER_POLLING
+    drv_data->poll_state = drv_data->ab_state;
+#endif
 
     return 0;
 }

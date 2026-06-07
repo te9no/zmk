@@ -30,6 +30,11 @@ config EC11_TRIGGER_OWN_THREAD
     depends on GPIO
     select EC11_TRIGGER
 
+config EC11_TRIGGER_POLLING
+    bool "Use polling thread"
+    depends on GPIO
+    select EC11_TRIGGER
+
 endchoice
 
 config EC11_TRIGGER
@@ -37,16 +42,57 @@ config EC11_TRIGGER
 
 config EC11_THREAD_PRIORITY
     int "Thread priority"
-    depends on EC11_TRIGGER_OWN_THREAD
+    depends on EC11_TRIGGER_OWN_THREAD || EC11_TRIGGER_POLLING
     default 10
     help
       Priority of thread used by the driver to handle interrupts.
 
 config EC11_THREAD_STACK_SIZE
     int "Thread stack size"
-    depends on EC11_TRIGGER_OWN_THREAD
+    depends on EC11_TRIGGER_OWN_THREAD || EC11_TRIGGER_POLLING
     default 1024
     help
       Stack size of thread used by the driver to handle interrupts.
+
+config EC11_POLLING_INTERVAL_MS
+    int "Polling interval in milliseconds"
+    default 2
+    depends on EC11_TRIGGER_POLLING
+    help
+      Interval used by the polling trigger mode. Polling mode does not attach
+      GPIO interrupts; it periodically reads the A/B GPIO state and fires the
+      sensor trigger when the state changes.
+
+config EC11_TRIGGER_A_PIN_ONLY
+    bool "Use only A pin as trigger source"
+    default n
+    depends on EC11_TRIGGER
+    help
+      Only enable GPIO interrupts on the encoder A pin. The B pin remains
+      configured as input and is read during sample fetch for direction
+      detection. This reduces interrupt storms caused by mechanical bounce on
+      both encoder phases.
+
+config EC11_SAMPLE_FETCH_READ_ONLY
+    bool "Read EC11 GPIO state without updating rotation state"
+    default n
+    help
+      Diagnostic option that makes sample_fetch read the current A/B GPIO
+      state, but skip pulse accumulation and state updates. This isolates GPIO
+      reads from EC11 state machine side effects.
+
+config EC11_SAMPLE_FETCH_READ_A_ONLY
+    bool "Read only EC11 A GPIO during sample_fetch"
+    default n
+    help
+      Diagnostic option that makes sample_fetch read only the A GPIO and return
+      without reading B or updating rotation state.
+
+config EC11_SAMPLE_FETCH_READ_B_ONLY
+    bool "Read only EC11 B GPIO during sample_fetch"
+    default n
+    help
+      Diagnostic option that makes sample_fetch read only the B GPIO and return
+      without reading A or updating rotation state.
 
 endif # EC11

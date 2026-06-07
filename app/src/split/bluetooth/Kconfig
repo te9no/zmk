@@ -76,6 +76,15 @@ config ZMK_SPLIT_BLE_PREF_TIMEOUT
 
 endif # ZMK_SPLIT_ROLE_CENTRAL
 
+config ZMK_SPLIT_BLE_SENSOR_STATE
+    bool "Enable BLE split sensor state characteristic"
+    default y
+    help
+      Enable the legacy split BLE sensor notification characteristic used to
+      forward zmk_sensor_event events from peripheral halves to the central
+      half. Disabling this leaves local sensors and input-split pointing events
+      intact, but removes the split sensor GATT characteristic/subscription.
+
 if !ZMK_SPLIT_ROLE_CENTRAL
 
 config ZMK_SPLIT_BLE_PERIPHERAL_STACK_SIZE

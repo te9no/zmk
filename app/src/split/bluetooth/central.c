@@ -72,14 +72,29 @@ struct peripheral_slot {
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
-static const struct bt_uuid *gatt_ccc_uuid = BT_UUID_GATT_CCC;
 static const struct bt_uuid *gatt_cpf_uuid = BT_UUID_GATT_CPF;
 
 struct peripheral_input_slot {
     struct bt_conn *conn;
     struct bt_gatt_subscribe_params sub;
+    struct bt_gatt_read_params cpf_read_params;
+    uint16_t service_end_handle;
+    uint16_t cpf_handle;
     uint8_t reg;
+    bool reg_set;
 };
+
+struct input_split_cpf_value {
+    uint8_t format;
+    int8_t exponent;
+    uint16_t unit;
+    uint8_t name_space;
+    uint16_t description;
+} __packed;
+
+static uint8_t split_central_input_cpf_read_func(struct bt_conn *conn, uint8_t err,
+                                                 struct bt_gatt_read_params *params,
+                                                 const void *data, uint16_t length);
 
 #define COUNT_INPUT_SPLIT(n) +1
 
@@ -93,7 +108,7 @@ static bool input_slot_is_open(size_t i) {
 static bool input_slot_is_pending(size_t i) {
     return i < ARRAY_SIZE(peripheral_input_slots) && peripheral_input_slots[i].conn != NULL &&
            (!peripheral_input_slots[i].sub.value_handle ||
-            !peripheral_input_slots[i].sub.ccc_handle || !peripheral_input_slots[i].reg);
+            !peripheral_input_slots[i].sub.ccc_handle || !peripheral_input_slots[i].reg_set);
 }
 
 static int reserve_next_open_input_slot(struct peripheral_input_slot **slot, struct bt_conn *conn) {
@@ -104,7 +119,12 @@ static int reserve_next_open_input_slot(struct peripheral_input_slot **slot, str
             // Clear out any previously set values
             peripheral_input_slots[i].sub.value_handle = 0;
             peripheral_input_slots[i].sub.ccc_handle = 0;
+            memset(&peripheral_input_slots[i].cpf_read_params, 0,
+                   sizeof(peripheral_input_slots[i].cpf_read_params));
+            peripheral_input_slots[i].service_end_handle = 0;
+            peripheral_input_slots[i].cpf_handle = 0;
             peripheral_input_slots[i].reg = 0;
+            peripheral_input_slots[i].reg_set = false;
             *slot = &peripheral_input_slots[i];
             return i;
         }
@@ -124,13 +144,76 @@ static int find_pending_input_slot(struct peripheral_input_slot **slot, struct b
     return -ENODEV;
 }
 
+static int find_input_slot_by_cpf_read_params(struct peripheral_input_slot **slot,
+                                              struct bt_gatt_read_params *params) {
+    for (size_t i = 0; i < ARRAY_SIZE(peripheral_input_slots); i++) {
+        if (&peripheral_input_slots[i].cpf_read_params == params) {
+            *slot = &peripheral_input_slots[i];
+            return i;
+        }
+    }
+
+    return -ENODEV;
+}
+
+static void release_peripheral_input_slot(struct peripheral_input_slot *slot) {
+    if (slot == NULL) {
+        return;
+    }
+
+    slot->conn = NULL;
+    slot->sub.value_handle = 0;
+    slot->sub.ccc_handle = 0;
+    slot->sub.notify = NULL;
+    memset(&slot->cpf_read_params, 0, sizeof(slot->cpf_read_params));
+    slot->service_end_handle = 0;
+    slot->cpf_handle = 0;
+    slot->reg = 0;
+    slot->reg_set = false;
+}
+
 void release_peripheral_input_subs(struct bt_conn *conn) {
     for (size_t i = 0; i < ARRAY_SIZE(peripheral_input_slots); i++) {
         if (peripheral_input_slots[i].conn == conn) {
-            peripheral_input_slots[i].conn = NULL;
-            // memset(&peripheral_input_slots[i], 0, sizeof(struct peripheral_input_slot));
+            release_peripheral_input_slot(&peripheral_input_slots[i]);
         }
     }
+}
+
+static bool resume_characteristic_discovery_after_input_desc(struct bt_conn *conn,
+                                                            struct peripheral_slot *slot,
+                                                            struct bt_gatt_discover_params *params,
+                                                            uint16_t start_handle) {
+    struct peripheral_input_slot *input_slot = NULL;
+    (void)find_pending_input_slot(&input_slot, conn);
+
+    uint16_t service_end_handle = input_slot != NULL && input_slot->service_end_handle != 0
+                                      ? input_slot->service_end_handle
+                                      : params->end_handle;
+
+    if (input_slot != NULL) {
+        LOG_WRN("Input descriptor discovery ended before subscription completed "
+                "(value_handle %u ccc_handle %u), skipping",
+                input_slot->sub.value_handle, input_slot->sub.ccc_handle);
+        release_peripheral_input_slot(input_slot);
+    }
+
+    if (start_handle == 0 || start_handle > service_end_handle) {
+        return false;
+    }
+
+    slot->discover_params.uuid = NULL;
+    slot->discover_params.start_handle = start_handle;
+    slot->discover_params.end_handle = service_end_handle;
+    slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+    int err = bt_gatt_discover(conn, &slot->discover_params);
+    if (err) {
+        LOG_ERR("Failed to resume split input characteristic discovery (err %d)", err);
+        return false;
+    }
+
+    return true;
 }
 
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
@@ -268,7 +351,7 @@ static void notify_status_work_cb(struct k_work *_work) { notify_transport_statu
 
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
 
 static uint8_t split_central_sensor_notify_func(struct bt_conn *conn,
                                                 struct bt_gatt_subscribe_params *params,
@@ -305,7 +388,7 @@ static uint8_t split_central_sensor_notify_func(struct bt_conn *conn,
 
     return BT_GATT_ITER_CONTINUE;
 }
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
@@ -634,6 +717,52 @@ static int split_central_subscribe(struct bt_conn *conn, struct bt_gatt_subscrib
     return err;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
+
+static uint8_t split_central_input_cpf_read_func(struct bt_conn *conn, uint8_t err,
+                                                 struct bt_gatt_read_params *params,
+                                                 const void *data, uint16_t length) {
+    struct peripheral_input_slot *input_slot = NULL;
+    int ret = find_input_slot_by_cpf_read_params(&input_slot, params);
+    if (ret < 0) {
+        LOG_WRN("No input slot found for CPF read params (%d)", ret);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (err) {
+        LOG_WRN("Input split CPF read failed at handle %u (err %u)", input_slot->cpf_handle, err);
+        release_peripheral_input_slot(input_slot);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (!data) {
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (length < sizeof(struct input_split_cpf_value)) {
+        LOG_WRN("Input split CPF read too short at handle %u: %u", input_slot->cpf_handle, length);
+        release_peripheral_input_slot(input_slot);
+        return BT_GATT_ITER_STOP;
+    }
+
+    const struct input_split_cpf_value *cpf = data;
+    input_slot->reg = sys_le16_to_cpu(cpf->description);
+    input_slot->reg_set = true;
+    LOG_DBG("Input split reg %u cpf_handle %u value_handle %u ccc_handle %u", input_slot->reg,
+            input_slot->cpf_handle, input_slot->sub.value_handle, input_slot->sub.ccc_handle);
+
+    input_slot->sub.notify = peripheral_input_event_notify_cb;
+    input_slot->sub.value = BT_GATT_CCC_NOTIFY;
+    int sub_err = split_central_subscribe(conn, &input_slot->sub);
+    if (sub_err < 0) {
+        LOG_WRN("Failed to subscribe to input notifications %d", sub_err);
+    }
+
+    return BT_GATT_ITER_STOP;
+}
+
+#endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
+
 static int update_peripheral_selected_layout(struct peripheral_slot *slot, uint8_t layout_idx) {
     if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
         return -ENOTCONN;
@@ -677,19 +806,29 @@ K_WORK_DEFINE(update_peripherals_selected_layouts_work,
 static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
                                                  const struct bt_gatt_attr *attr,
                                                  struct bt_gatt_discover_params *params) {
+    struct peripheral_slot *slot = peripheral_slot_for_conn(conn);
+    if (slot == NULL) {
+        LOG_ERR("No peripheral state found for connection");
+        return BT_GATT_ITER_STOP;
+    }
+
     if (!attr) {
+#if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
+        if (params->type == BT_GATT_DISCOVER_STD_CHAR_DESC) {
+            uint16_t resume_handle = params->end_handle < UINT16_MAX ? params->end_handle + 1 : 0;
+            if (resume_characteristic_discovery_after_input_desc(conn, slot, params,
+                                                                 resume_handle)) {
+                return BT_GATT_ITER_STOP;
+            }
+        }
+#endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
+
         LOG_DBG("Discover complete");
         return BT_GATT_ITER_STOP;
     }
 
     if (!attr->user_data) {
         LOG_ERR("Required user data not passed to discovery");
-        return BT_GATT_ITER_STOP;
-    }
-
-    struct peripheral_slot *slot = peripheral_slot_for_conn(conn);
-    if (slot == NULL) {
-        LOG_ERR("No peripheral state found for connection");
         return BT_GATT_ITER_STOP;
     }
 
@@ -707,7 +846,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->subscribe_params.notify = split_central_notify_func;
             slot->subscribe_params.value = BT_GATT_CCC_NOTIFY;
             split_central_subscribe(conn, &slot->subscribe_params);
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
         } else if (bt_uuid_cmp(chrc_uuid,
                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CHAR_SENSOR_STATE_UUID)) == 0) {
             slot->discover_params.uuid = NULL;
@@ -720,7 +859,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->sensor_subscribe_params.notify = split_central_sensor_notify_func;
             slot->sensor_subscribe_params.value = BT_GATT_CCC_NOTIFY;
             split_central_subscribe(conn, &slot->sensor_subscribe_params);
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
         } else if (bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_RELAY_EVENT_UUID)) ==
                    0) {
@@ -751,10 +890,27 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             } else {
                 LOG_DBG("Reserved a slot for the input subscription");
                 input_slot->sub.value_handle = bt_gatt_attr_value_handle(attr);
+                input_slot->sub.ccc_handle = input_slot->sub.value_handle + 1;
+                input_slot->service_end_handle = slot->discover_params.end_handle;
+                input_slot->cpf_handle = input_slot->sub.value_handle + 2;
+                LOG_DBG("Input split characteristic value_handle %u ccc_handle %u cpf_handle %u",
+                        input_slot->sub.value_handle, input_slot->sub.ccc_handle,
+                        input_slot->cpf_handle);
 
-                slot->discover_params.uuid = gatt_ccc_uuid;
-                slot->discover_params.start_handle = attr->handle;
-                slot->discover_params.type = BT_GATT_DISCOVER_STD_CHAR_DESC;
+                input_slot->cpf_read_params.func = split_central_input_cpf_read_func;
+                input_slot->cpf_read_params.handle_count = 1;
+                input_slot->cpf_read_params.single.handle = input_slot->cpf_handle;
+                input_slot->cpf_read_params.single.offset = 0;
+                int read_err = bt_gatt_read(conn, &input_slot->cpf_read_params);
+                if (read_err) {
+                    LOG_WRN("Failed to start input CPF read at handle %u (err %d)",
+                            input_slot->cpf_handle, read_err);
+                    release_peripheral_input_slot(input_slot);
+                }
+
+                slot->discover_params.uuid = NULL;
+                slot->discover_params.start_handle = attr->handle + 2;
+                slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
             }
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
         } else if (bt_uuid_cmp(chrc_uuid,
@@ -808,21 +964,28 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             } else {
                 LOG_DBG("Found pending input slot");
                 input_slot->sub.ccc_handle = attr->handle;
+                LOG_DBG("Input split CCC handle %u for value_handle %u", attr->handle,
+                        input_slot->sub.value_handle);
 
                 slot->discover_params.uuid = gatt_cpf_uuid;
                 slot->discover_params.start_handle = attr->handle + 1;
+                slot->discover_params.end_handle = attr->handle + 1;
                 slot->discover_params.type = BT_GATT_DISCOVER_STD_CHAR_DESC;
             }
         } else if (bt_uuid_cmp(slot->discover_params.uuid, BT_UUID_GATT_CPF) == 0) {
             LOG_DBG("Found input CPF descriptor");
             struct bt_gatt_cpf *cpf = attr->user_data;
-            struct peripheral_input_slot *input_slot;
+            struct peripheral_input_slot *input_slot = NULL;
             int ret = find_pending_input_slot(&input_slot, conn);
             if (ret < 0) {
                 LOG_DBG("No pending input slot (%d)", ret);
             } else {
                 LOG_DBG("Found pending input slot");
                 input_slot->reg = cpf->description;
+                input_slot->reg_set = true;
+                LOG_DBG("Input split reg %u cpf_handle %u value_handle %u ccc_handle %u",
+                        input_slot->reg, attr->handle, input_slot->sub.value_handle,
+                        input_slot->sub.ccc_handle);
                 input_slot->sub.notify = peripheral_input_event_notify_cb;
                 input_slot->sub.value = BT_GATT_CCC_NOTIFY;
                 int err = split_central_subscribe(conn, &input_slot->sub);
@@ -833,6 +996,9 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
 
             slot->discover_params.uuid = NULL;
             slot->discover_params.start_handle = attr->handle + 1;
+            if (input_slot != NULL && input_slot->service_end_handle != 0) {
+                slot->discover_params.end_handle = input_slot->service_end_handle;
+            }
             slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
         }
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
@@ -842,9 +1008,9 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     bool subscribed = slot->run_behavior_handle && slot->subscribe_params.value_handle &&
                       slot->selected_physical_layout_handle;
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
     subscribed = subscribed && slot->sensor_subscribe_params.value_handle;
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
     subscribed = subscribed && slot->relay_event_subscribe_params.value_handle;

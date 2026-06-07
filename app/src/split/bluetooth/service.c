@@ -35,7 +35,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/sensor_event.h>
 #include <zmk/sensors.h>
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
 static struct sensor_event last_sensor_event;
 
 static ssize_t split_svc_sensor_state(struct bt_conn *conn, const struct bt_gatt_attr *attrs,
@@ -47,7 +47,7 @@ static ssize_t split_svc_sensor_state(struct bt_conn *conn, const struct bt_gatt
 static void split_svc_sensor_state_ccc(const struct bt_gatt_attr *attr, uint16_t value) {
     LOG_DBG("value %d", value);
 }
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #define POS_STATE_LEN 16
 
@@ -220,8 +220,52 @@ static ssize_t split_svc_get_selected_phys_layout(struct bt_conn *conn,
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
+extern const struct bt_gatt_service_static split_svc;
+
+static uint32_t subscribed_input_regs;
+static uint8_t unsubscribed_input_drop_log_budget = 16;
+
+static bool input_split_reg_is_subscribed(uint8_t reg) {
+    if (reg >= 32) {
+        return false;
+    }
+
+    return (subscribed_input_regs & BIT(reg)) != 0;
+}
+
+static bool input_split_reg_for_ccc_attr(const struct bt_gatt_attr *attr, uint8_t *reg) {
+    for (size_t i = 1; i + 1 < split_svc.attr_count; i++) {
+        if (&split_svc.attrs[i] != attr) {
+            continue;
+        }
+
+        if (bt_uuid_cmp(split_svc.attrs[i - 1].uuid,
+                        BT_UUID_DECLARE_128(ZMK_SPLIT_BT_INPUT_EVENT_UUID)) == 0 &&
+            bt_uuid_cmp(split_svc.attrs[i + 1].uuid, BT_UUID_GATT_CPF) == 0) {
+            *reg = (uint8_t)(uint32_t)split_svc.attrs[i + 1].user_data;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void split_input_events_ccc(const struct bt_gatt_attr *attr, uint16_t value) {
-    LOG_DBG("value %d", value);
+    uint8_t reg;
+
+    if (!input_split_reg_for_ccc_attr(attr, &reg)) {
+        LOG_DBG("value %d", value);
+        return;
+    }
+
+    if (reg < 32 && (value & BT_GATT_CCC_NOTIFY)) {
+        subscribed_input_regs |= BIT(reg);
+        unsubscribed_input_drop_log_budget = 16;
+    } else if (reg < 32) {
+        subscribed_input_regs &= ~BIT(reg);
+    }
+
+    LOG_DBG("reg %u value %d subscribed %d", reg, value, input_split_reg_is_subscribed(reg));
 }
 
 // Duplicated from Zephyr, since it is internal there
@@ -268,12 +312,12 @@ BT_GATT_SERVICE_DEFINE(
                            split_svc_run_behavior, &behavior_run_payload),
     BT_GATT_DESCRIPTOR(BT_UUID_NUM_OF_DIGITALS, BT_GATT_PERM_READ, split_svc_num_of_positions, NULL,
                        &num_of_positions),
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_CHAR_SENSOR_STATE_UUID),
                            BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ_ENCRYPT,
                            split_svc_sensor_state, NULL, &last_sensor_event),
     BT_GATT_CCC(split_svc_sensor_state_ccc, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_RELAY_EVENT_UUID),
                            BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_NOTIFY,
@@ -344,7 +388,7 @@ static int zmk_split_bt_position_released(uint8_t position) {
     return send_position_state();
 }
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
 K_MSGQ_DEFINE(sensor_state_msgq, sizeof(struct sensor_event),
               CONFIG_ZMK_SPLIT_BLE_PERIPHERAL_POSITION_QUEUE_SIZE, 4);
 
@@ -394,7 +438,7 @@ static int zmk_split_bt_sensor_triggered(uint8_t sensor_index,
            channel_data_size * sizeof(struct zmk_sensor_channel_data));
     return send_sensor_state(ev);
 }
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
@@ -473,23 +517,84 @@ int zmk_split_bt_send_relay_event(const struct zmk_split_relay_event_payload *ev
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
 static int zmk_split_bt_report_input(uint8_t reg, uint8_t type, uint16_t code, int32_t value,
-                                     bool sync) {
+                                     bool sync);
 
+struct split_input_event_msg {
+    uint8_t reg;
+    struct zmk_split_input_event_payload payload;
+};
+
+K_MSGQ_DEFINE(input_event_msgq, sizeof(struct split_input_event_msg),
+              CONFIG_ZMK_SPLIT_BLE_PERIPHERAL_POSITION_QUEUE_SIZE, 4);
+
+static const struct bt_gatt_attr *split_input_attr_for_reg(uint8_t reg) {
     for (size_t i = 0; i < split_svc.attr_count; i++) {
         if (bt_uuid_cmp(split_svc.attrs[i].uuid,
                         BT_UUID_DECLARE_128(ZMK_SPLIT_BT_INPUT_EVENT_UUID)) == 0 &&
             (uint8_t)(uint32_t)split_svc.attrs[i + 2].user_data == reg) {
-            struct zmk_split_input_event_payload payload = {
-                .type = type,
-                .code = code,
-                .value = value,
-                .sync = sync ? 1 : 0,
-            };
-
-            return bt_gatt_notify(NULL, &split_svc.attrs[i], &payload, sizeof(payload));
+            return &split_svc.attrs[i];
         }
     }
-    return -ENODEV;
+
+    return NULL;
+}
+
+static void send_input_event_callback(struct k_work *work) {
+    struct split_input_event_msg msg;
+
+    while (k_msgq_get(&input_event_msgq, &msg, K_NO_WAIT) == 0) {
+        const struct bt_gatt_attr *attr = split_input_attr_for_reg(msg.reg);
+
+        if (attr == NULL) {
+            LOG_WRN("No input split characteristic for reg %u", msg.reg);
+            continue;
+        }
+
+        int err = bt_gatt_notify(NULL, attr, &msg.payload, sizeof(msg.payload));
+        if (err) {
+            LOG_DBG("Error notifying input split event reg %u: %d", msg.reg, err);
+        }
+    }
+}
+
+K_WORK_DEFINE(service_input_event_notify_work, send_input_event_callback);
+
+static int zmk_split_bt_report_input(uint8_t reg, uint8_t type, uint16_t code, int32_t value,
+                                     bool sync) {
+    if (!input_split_reg_is_subscribed(reg)) {
+        if (unsubscribed_input_drop_log_budget > 0) {
+            LOG_DBG("Dropping input split event reg %u; no subscriber", reg);
+            unsubscribed_input_drop_log_budget--;
+        }
+        return -ENOTCONN;
+    }
+
+    struct split_input_event_msg msg = {
+        .reg = reg,
+        .payload = {
+            .type = type,
+            .code = code,
+            .value = value,
+            .sync = sync ? 1 : 0,
+        },
+    };
+
+    int err = k_msgq_put(&input_event_msgq, &msg, K_NO_WAIT);
+
+    if (err == -ENOMSG || err == -EAGAIN) {
+        struct split_input_event_msg discarded;
+
+        (void)k_msgq_get(&input_event_msgq, &discarded, K_NO_WAIT);
+        err = k_msgq_put(&input_event_msgq, &msg, K_NO_WAIT);
+    }
+
+    if (err) {
+        LOG_DBG("Failed to queue input split event %d", err);
+        return err;
+    }
+
+    k_work_submit_to_queue(&service_work_q, &service_input_event_notify_work);
+    return 0;
 }
 
 #endif /* IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT) */
@@ -515,7 +620,7 @@ int zmk_split_transport_peripheral_bt_report_event(
             zmk_split_bt_position_released(ev->data.key_position_event.position);
         }
         break;
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_SENSOR_EVENT:
         zmk_split_bt_sensor_triggered(ev->data.sensor_event.sensor_index,
                                       &ev->data.sensor_event.channel_data, 1);

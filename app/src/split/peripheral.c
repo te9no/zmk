@@ -145,7 +145,7 @@ int split_peripheral_listener(const zmk_event_t *eh) {
         zmk_split_peripheral_report_event(&ev);
     }
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
     const struct zmk_sensor_event *sensor_ev;
     if ((sensor_ev = as_zmk_sensor_event(eh)) != NULL) {
         if (sensor_ev->channel_data_size != 1) {
@@ -161,7 +161,7 @@ int split_peripheral_listener(const zmk_event_t *eh) {
 
         zmk_split_peripheral_report_event(&ev);
     }
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
     const struct zmk_battery_state_changed *battery_ev;
@@ -182,9 +182,9 @@ int split_peripheral_listener(const zmk_event_t *eh) {
 ZMK_LISTENER(split_peripheral, split_peripheral_listener);
 ZMK_SUBSCRIPTION(split_peripheral, zmk_position_state_changed);
 
-#if ZMK_KEYMAP_HAS_SENSORS
+#if ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE)
 ZMK_SUBSCRIPTION(split_peripheral, zmk_sensor_event);
-#endif /* ZMK_KEYMAP_HAS_SENSORS */
+#endif /* ZMK_KEYMAP_HAS_SENSORS && IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_SENSOR_STATE) */
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
 ZMK_SUBSCRIPTION(split_peripheral, zmk_battery_state_changed);

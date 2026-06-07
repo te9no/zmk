@@ -23,6 +23,9 @@ struct ec11_data {
     int8_t pulses;
     int8_t ticks;
     int8_t delta;
+#ifdef CONFIG_EC11_TRIGGER_POLLING
+    uint8_t poll_state;
+#endif
 
 #ifdef CONFIG_EC11_TRIGGER
     struct gpio_callback a_gpio_cb;
@@ -32,9 +35,14 @@ struct ec11_data {
     sensor_trigger_handler_t handler;
     const struct sensor_trigger *trigger;
 
-#if defined(CONFIG_EC11_TRIGGER_OWN_THREAD)
+#if defined(CONFIG_EC11_TRIGGER_OWN_THREAD) || defined(CONFIG_EC11_TRIGGER_POLLING)
     K_THREAD_STACK_MEMBER(thread_stack, CONFIG_EC11_THREAD_STACK_SIZE);
+#endif
+
+#if defined(CONFIG_EC11_TRIGGER_OWN_THREAD)
     struct k_sem gpio_sem;
+    struct k_thread thread;
+#elif defined(CONFIG_EC11_TRIGGER_POLLING)
     struct k_thread thread;
 #elif defined(CONFIG_EC11_TRIGGER_GLOBAL_THREAD)
     struct k_work work;
@@ -42,6 +50,9 @@ struct ec11_data {
 
 #endif /* CONFIG_EC11_TRIGGER */
 };
+
+int ec11_get_ab_state(const struct device *dev);
+int ec11_update_ab_state(const struct device *dev, uint8_t val);
 
 #ifdef CONFIG_EC11_TRIGGER
 

@@ -28,8 +28,12 @@ static inline void setup_int(const struct device *dev, bool enable) {
         LOG_WRN("Unable to set A pin GPIO interrupt");
     }
 
+    if (IS_ENABLED(CONFIG_EC11_TRIGGER_A_PIN_ONLY)) {
+        return;
+    }
+
     if (gpio_pin_interrupt_configure_dt(&cfg->b, enable ? GPIO_INT_EDGE_BOTH : GPIO_INT_DISABLE)) {
-        LOG_WRN("Unable to set A pin GPIO interrupt");
+        LOG_WRN("Unable to set B pin GPIO interrupt");
     }
 }
 
@@ -95,18 +99,59 @@ static void ec11_work_cb(struct k_work *work) {
 }
 #endif
 
+#ifdef CONFIG_EC11_TRIGGER_POLLING
+static void ec11_polling_thread(void *dev_ptr, void *unused1, void *unused2) {
+    const struct device *dev = dev_ptr;
+    struct ec11_data *drv_data = dev->data;
+
+    ARG_UNUSED(unused1);
+    ARG_UNUSED(unused2);
+
+    while (1) {
+        int state;
+
+        k_msleep(CONFIG_EC11_POLLING_INTERVAL_MS);
+
+        if (drv_data->handler == NULL || drv_data->trigger == NULL) {
+            continue;
+        }
+
+        state = ec11_get_ab_state(dev);
+        if (state < 0) {
+            LOG_WRN("Unable to read EC11 GPIO state: %d", state);
+            continue;
+        }
+
+        if ((uint8_t)state == drv_data->poll_state) {
+            continue;
+        }
+
+        drv_data->poll_state = (uint8_t)state;
+        if (ec11_update_ab_state(dev, (uint8_t)state) == 0) {
+            continue;
+        }
+
+        drv_data->handler(dev, drv_data->trigger);
+    }
+}
+#endif
+
 int ec11_trigger_set(const struct device *dev, const struct sensor_trigger *trig,
                      sensor_trigger_handler_t handler) {
     struct ec11_data *drv_data = dev->data;
 
+#if !defined(CONFIG_EC11_TRIGGER_POLLING)
     setup_int(dev, false);
 
     k_msleep(5);
+#endif
 
     drv_data->trigger = trig;
     drv_data->handler = handler;
 
+#if !defined(CONFIG_EC11_TRIGGER_POLLING)
     setup_int(dev, true);
+#endif
 
     return 0;
 }
@@ -115,6 +160,15 @@ int ec11_init_interrupt(const struct device *dev) {
     struct ec11_data *drv_data = dev->data;
     const struct ec11_config *drv_cfg = dev->config;
 
+#if defined(CONFIG_EC11_TRIGGER_POLLING)
+    drv_data->dev = dev;
+
+    k_thread_create(&drv_data->thread, drv_data->thread_stack, CONFIG_EC11_THREAD_STACK_SIZE,
+                    ec11_polling_thread, (void *)dev, NULL, NULL,
+                    K_PRIO_COOP(CONFIG_EC11_THREAD_PRIORITY), 0, K_NO_WAIT);
+
+    return 0;
+#else
     drv_data->dev = dev;
     /* setup gpio interrupt */
 
@@ -127,9 +181,11 @@ int ec11_init_interrupt(const struct device *dev) {
 
     gpio_init_callback(&drv_data->b_gpio_cb, ec11_b_gpio_callback, BIT(drv_cfg->b.pin));
 
-    if (gpio_add_callback(drv_cfg->b.port, &drv_data->b_gpio_cb) < 0) {
-        LOG_DBG("Failed to set B callback!");
-        return -EIO;
+    if (!IS_ENABLED(CONFIG_EC11_TRIGGER_A_PIN_ONLY)) {
+        if (gpio_add_callback(drv_cfg->b.port, &drv_data->b_gpio_cb) < 0) {
+            LOG_DBG("Failed to set B callback!");
+            return -EIO;
+        }
     }
 
 #if defined(CONFIG_EC11_TRIGGER_OWN_THREAD)
@@ -143,4 +199,5 @@ int ec11_init_interrupt(const struct device *dev) {
 #endif
 
     return 0;
+#endif
 }
