@@ -63,6 +63,8 @@ int zmk_input_split_report_peripheral_event(uint8_t reg, uint8_t type, uint16_t 
                 return;                                                                            \
             }                                                                                      \
         }                                                                                          \
+        LOG_DBG("Report split input reg=%d type=%d code=%d value=%d sync=%d",                      \
+                DT_INST_REG_ADDR(n), evt->type, evt->code, evt->value, evt->sync);                 \
         struct zmk_split_transport_peripheral_event ev = {                                         \
             .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT,                         \
             .data = {.input_event = {                                                              \

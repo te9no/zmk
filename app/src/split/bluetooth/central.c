@@ -463,6 +463,9 @@ static uint8_t peripheral_input_event_notify_cb(struct bt_conn *conn,
 
     for (size_t i = 0; i < ARRAY_SIZE(peripheral_input_slots); i++) {
         if (&peripheral_input_slots[i].sub == params) {
+            LOG_DBG("[INPUT EVENT] reg=%d type=%d code=%d value=%d sync=%d",
+                    peripheral_input_slots[i].reg, payload.type, payload.code, (int32_t)payload.value,
+                    payload.sync);
             struct peripheral_event_wrapper event_wrapper = {
                 .source = peripheral_slot_index_for_conn(conn),
                 .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT,
@@ -1446,8 +1449,15 @@ static int finish_init() {
 void peripheral_event_work_callback(struct k_work *work) {
     struct peripheral_event_wrapper ev;
     while (k_msgq_get(&peripheral_event_msgq, &ev, K_NO_WAIT) == 0) {
-        LOG_DBG("Trigger key position state change for %d",
-                ev.event.data.key_position_event.position);
+        if (ev.event.type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT) {
+            LOG_DBG("Trigger key position state change for %d",
+                    ev.event.data.key_position_event.position);
+        } else if (ev.event.type == ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT) {
+            LOG_DBG("Trigger input event reg=%d type=%d code=%d value=%d sync=%d",
+                    ev.event.data.input_event.reg, ev.event.data.input_event.type,
+                    ev.event.data.input_event.code, ev.event.data.input_event.value,
+                    ev.event.data.input_event.sync);
+        }
         zmk_split_transport_central_peripheral_event_handler(&bt_central, ev.source, ev.event);
     }
 }
