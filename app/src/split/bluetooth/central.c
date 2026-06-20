@@ -20,6 +20,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/stdlib.h>
+#include <zmk/battery.h>
 #include <zmk/ble.h>
 #include <zmk/behavior.h>
 #include <zmk/sensors.h>
@@ -35,6 +36,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/physical_layouts.h>
 
 static int start_scanning(void);
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT) && IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+static void schedule_current_central_battery_level_relay(void);
+#endif
 
 #define POSITION_STATE_DATA_LEN 16
 
@@ -143,6 +148,73 @@ static struct peripheral_slot peripherals[ZMK_SPLIT_BLE_PERIPHERAL_COUNT];
 static bool is_scanning = false;
 
 static const struct bt_uuid_128 split_service_uuid = BT_UUID_INIT_128(ZMK_SPLIT_BT_SERVICE_UUID);
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT) && IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+static void central_battery_level_relay_work_handler(struct k_work *work);
+
+K_WORK_DELAYABLE_DEFINE(central_battery_level_relay_work,
+                        central_battery_level_relay_work_handler);
+
+static bool central_battery_level_relay_targets_ready(bool *has_pending_target) {
+    bool has_connected_target = false;
+    *has_pending_target = false;
+
+    for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
+        struct peripheral_slot *slot = &peripherals[i];
+        if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
+            continue;
+        }
+
+        has_connected_target = true;
+
+        if (slot->relay_event_subscribe_params.value_handle == 0 ||
+            bt_conn_get_security(slot->conn) < BT_SECURITY_L2) {
+            *has_pending_target = true;
+            return false;
+        }
+    }
+
+    return has_connected_target;
+}
+
+static void relay_current_central_battery_level(void) {
+    bool has_pending_target = false;
+    if (!central_battery_level_relay_targets_ready(&has_pending_target)) {
+        if (has_pending_target) {
+            k_work_schedule(&central_battery_level_relay_work, K_MSEC(500));
+        }
+        return;
+    }
+
+    int err = raise_zmk_central_battery_state_changed(
+        (struct zmk_central_battery_state_changed){
+            .state_of_charge = zmk_battery_state_of_charge(),
+        });
+
+    if (err < 0) {
+        LOG_WRN("Failed to relay current central battery level: %d", err);
+    }
+}
+
+static void central_battery_level_relay_work_handler(struct k_work *work) {
+    relay_current_central_battery_level();
+}
+
+static void schedule_current_central_battery_level_relay(void) {
+    k_work_schedule(&central_battery_level_relay_work, K_MSEC(100));
+}
+
+static int central_battery_relay_listener(const zmk_event_t *eh) {
+    if (as_zmk_battery_state_changed(eh) != NULL) {
+        schedule_current_central_battery_level_relay();
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(central_battery_relay, central_battery_relay_listener);
+ZMK_SUBSCRIPTION(central_battery_relay, zmk_battery_state_changed);
+#endif
 
 struct peripheral_event_wrapper {
     uint8_t source;
@@ -868,7 +940,14 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     }
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
-    return subscribed ? BT_GATT_ITER_STOP : BT_GATT_ITER_CONTINUE;
+    if (subscribed) {
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT) && IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+        schedule_current_central_battery_level_relay();
+#endif
+        return BT_GATT_ITER_STOP;
+    }
+
+    return BT_GATT_ITER_CONTINUE;
 }
 
 static uint8_t split_central_service_discovery_func(struct bt_conn *conn,
@@ -1151,7 +1230,7 @@ static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
 static void split_central_security_changed(struct bt_conn *conn, bt_security_t level,
                                            enum bt_security_err err) {
     struct peripheral_slot *slot = peripheral_slot_for_conn(conn);
-    if (!slot || !slot->selected_physical_layout_handle) {
+    if (!slot) {
         return;
     }
 
@@ -1162,6 +1241,14 @@ static void split_central_security_changed(struct bt_conn *conn, bt_security_t l
 
     if (level < BT_SECURITY_L2) {
         LOG_DBG("Skipping updating the physical layout for peripheral with insufficient security");
+        return;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT) && IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+    schedule_current_central_battery_level_relay();
+#endif
+
+    if (!slot->selected_physical_layout_handle) {
         return;
     }
 

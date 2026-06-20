@@ -101,6 +101,16 @@ static int zmk_battery_update(const struct device *battery) {
             LOG_ERR("Failed to raise battery state changed event: %d", rc);
             return rc;
         }
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&               \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+        rc = raise_zmk_central_battery_state_changed(
+            (struct zmk_central_battery_state_changed){.state_of_charge = last_state_of_charge});
+
+        if (rc != 0) {
+            LOG_WRN("Failed to raise central battery state changed event: %d", rc);
+        }
+#endif
     }
 
 #if IS_ENABLED(CONFIG_BT_BAS)

@@ -23,3 +23,10 @@ struct zmk_peripheral_battery_state_changed {
 };
 
 ZMK_EVENT_DECLARE(zmk_peripheral_battery_state_changed);
+
+struct zmk_central_battery_state_changed {
+    // TODO: Other battery channels
+    uint8_t state_of_charge;
+};
+
+ZMK_EVENT_DECLARE(zmk_central_battery_state_changed);
