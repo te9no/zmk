@@ -131,6 +131,10 @@ static bool rpc_tx_buffer_write(pb_ostream_t *stream, const uint8_t *buf, size_t
         uint32_t claim_len = ring_buf_put_claim(&rpc_tx_buf, &write_buf, count - written);
 
         if (claim_len == 0) {
+            /* The TX ring buffer is full. Kick the transport to drain it and
+             * free space before we sleep, otherwise we would just spin here
+             * waiting for a flush that nothing else is going to trigger. */
+            selected_transport->tx_notify(&rpc_tx_buf, 0, true, user_data);
             k_sleep(K_MSEC(1));
             continue;
         }
@@ -199,6 +203,8 @@ static int send_response(const zmk_studio_Response *resp) {
             err = -ENOMEM;
             goto exit;
         }
+        /* Drain the TX ring buffer to make room for the framing byte. */
+        selected_transport->tx_notify(&rpc_tx_buf, 0, true, user_data);
         k_sleep(K_MSEC(1));
     }
 
@@ -228,6 +234,8 @@ static int send_response(const zmk_studio_Response *resp) {
             err = -ENOMEM;
             goto exit;
         }
+        /* Drain the TX ring buffer to make room for the framing byte. */
+        selected_transport->tx_notify(&rpc_tx_buf, 0, true, user_data);
         k_sleep(K_MSEC(1));
     }
 
