@@ -196,7 +196,23 @@ static void gatt_tx_notify(struct ring_buf *tx_buf, size_t added, bool msg_done,
     atomic_t ns = atomic_get(&notify_size);
 
     if (msg_done || state->pending_notify > ns) {
-        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &notify_tx_work);
+        struct k_work_q *lowprio_q = zmk_workqueue_lowprio_work_q();
+
+        if (k_current_get() == &lowprio_q->thread) {
+            /* We are already running on the low priority work queue (e.g. a
+             * Studio RPC notification raised from a listener on that queue).
+             * Submitting notify_tx_work here would never run: this thread is
+             * busy encoding the response and blocks in send_response()'s
+             * k_sleep() loop waiting for the TX ring buffer to drain, but the
+             * work item that drains it can only run once this thread yields the
+             * queue. That is a deadlock. Flush directly instead so the first
+             * bt_gatt_indicate() is issued; indicate_cb() then resubmits on the
+             * system work queue to drain the rest asynchronously. */
+            notif_rpc_tx_cb(&notify_tx_work);
+        } else {
+            k_work_submit_to_queue(lowprio_q, &notify_tx_work);
+        }
+
         state->pending_notify = 0;
     }
 }
