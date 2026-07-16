@@ -145,6 +145,8 @@ ZMK_EVENT_DECLARE(zmk_relay_event_received);
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
+#include <zmk/split/central.h>
+
 /**
  * @brief Define event listener for _event_type to send given event to peripheral.
  * @param event_type name of event struct type

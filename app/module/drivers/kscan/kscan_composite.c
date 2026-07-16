@@ -8,6 +8,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
 #include <zephyr/drivers/kscan.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
