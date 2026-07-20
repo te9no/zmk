@@ -84,6 +84,14 @@ K_WORK_DELAYABLE_DEFINE(activity_settings_save_work, activity_settings_save_work
 
 #endif
 
+static int activity_settings_save(void) {
+#if IS_ENABLED(CONFIG_SETTINGS)
+    return k_work_reschedule(&activity_settings_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
+#else
+    return 0;
+#endif
+}
+
 int raise_event(void) {
     return raise_zmk_activity_state_changed(
         (struct zmk_activity_state_changed){.state = activity_state});
@@ -107,7 +115,7 @@ bool zmk_activity_set_sleep_ms(uint32_t sleep_ms) {
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
     activity_settings.sleep_ms = sleep_ms;
     LOG_INF("Updated sleep timeout to %d ms", sleep_ms);
-    k_work_schedule(&activity_settings_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
+    activity_settings_save();
     return true;
 #else
     LOG_WRN("Sleep functionality is not enabled");
@@ -118,7 +126,7 @@ bool zmk_activity_set_sleep_ms(uint32_t sleep_ms) {
 bool zmk_activity_set_idle_ms(uint32_t idle_ms) {
     activity_settings.idle_ms = idle_ms;
     LOG_INF("Updated idle timeout to %d ms", idle_ms);
-    k_work_schedule(&activity_settings_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
+    activity_settings_save();
     return true;
 }
 
