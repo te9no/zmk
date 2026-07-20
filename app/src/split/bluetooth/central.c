@@ -327,12 +327,19 @@ static uint8_t relay_event_tx_sequence;
 static uint8_t relay_event_frame[RELAY_EVENT_FRAME_MAX_SIZE];
 static K_MUTEX_DEFINE(relay_event_frame_lock);
 
-K_MSGQ_DEFINE(relay_event_msgq, sizeof(struct zmk_split_relay_event_payload),
+struct relay_event_wrapper {
+    uint8_t source;
+    struct zmk_split_relay_event_payload payload;
+};
+
+K_MSGQ_DEFINE(relay_event_msgq, sizeof(struct relay_event_wrapper),
               CONFIG_ZMK_SPLIT_BLE_CENTRAL_POSITION_QUEUE_SIZE, 4);
 K_WORK_DEFINE(update_peripherals_relay_event_work, update_peripherals_relay_event_work_handler);
 
-int zmk_split_central_send_relay_event(struct zmk_split_relay_event_payload *payload) {
-    int err = k_msgq_put(&relay_event_msgq, payload, K_NO_WAIT);
+static int split_central_bt_queue_relay_event(uint8_t source,
+                                              const struct zmk_split_relay_event_payload *payload) {
+    struct relay_event_wrapper wrapper = {.source = source, .payload = *payload};
+    int err = k_msgq_put(&relay_event_msgq, &wrapper, K_NO_WAIT);
     if (err) {
         LOG_ERR("Failed to queue relay event to send (%d)", err);
         return err;
@@ -407,36 +414,30 @@ split_central_write_relay_event_chunks(struct peripheral_slot *slot,
 }
 
 static void update_peripherals_relay_event_work_handler(struct k_work *_work) {
-    struct zmk_split_relay_event_payload payload;
-    if (k_msgq_get(&relay_event_msgq, &payload, K_NO_WAIT) != 0) {
+    struct relay_event_wrapper wrapper;
+    if (k_msgq_get(&relay_event_msgq, &wrapper, K_NO_WAIT) != 0) {
         return;
     }
 
-    for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
-        struct peripheral_slot *slot = &peripherals[i];
+    if (wrapper.source < ZMK_SPLIT_BLE_PERIPHERAL_COUNT) {
+        struct peripheral_slot *slot = &peripherals[wrapper.source];
         if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
-            continue;
-        }
-
-        if (slot->relay_event_subscribe_params.value_handle == 0) {
+            LOG_WRN("Peripheral %u not connected, dropping relay event", wrapper.source);
+        } else if (slot->relay_event_subscribe_params.value_handle == 0) {
             // It appears that sometimes the peripheral is considered connected
             // before the GATT characteristics have been discovered. If this is
-            // the case, the selected_physical_layout_handle will not yet be set.
+            // the case, the relay event value handle will not yet be set.
             LOG_WRN("Peripheral relay event subscribe params not set, cannot send relay event");
-            return;
-        }
-
-        if (bt_conn_get_security(slot->conn) < BT_SECURITY_L2) {
+        } else if (bt_conn_get_security(slot->conn) < BT_SECURITY_L2) {
             LOG_WRN("Peripheral link not encrypted, cannot send relay event");
-            return;
-        }
-
-        split_central_write_relay_event_chunks(slot, &payload);
-        if (k_msgq_num_used_get(&relay_event_msgq) > 0) {
-            k_work_submit(&update_peripherals_relay_event_work);
+        } else {
+            split_central_write_relay_event_chunks(slot, &wrapper.payload);
         }
     }
-    return;
+
+    if (k_msgq_num_used_get(&relay_event_msgq) > 0) {
+        k_work_submit(&update_peripherals_relay_event_work);
+    }
 }
 
 static uint8_t split_central_relay_event_notify_func(struct bt_conn *conn,
@@ -1416,6 +1417,12 @@ static int split_central_bt_send_command(uint8_t source,
         struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};
         return split_bt_invoke_behavior_payload(wrapper);
     }
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_RELAY_EVENT:
+        // Relay events don't fit in a single unchunked GATT write, so route them
+        // to the dedicated chunked relay event characteristic writer.
+        return split_central_bt_queue_relay_event(source, &cmd.data.relay_event);
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS:
         return -ENOTSUP;
     default:

@@ -90,6 +90,9 @@ enum zmk_split_transport_central_command_type {
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_INVOKE_BEHAVIOR,
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_PHYSICAL_LAYOUT,
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS,
+#ifdef CONFIG_ZMK_SPLIT_RELAY_EVENT
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_RELAY_EVENT,
+#endif
 } __packed;
 
 struct zmk_split_transport_central_command {
@@ -111,5 +114,9 @@ struct zmk_split_transport_central_command {
         struct {
             zmk_hid_indicators_t indicators;
         } set_hid_indicators;
+
+#ifdef CONFIG_ZMK_SPLIT_RELAY_EVENT
+        struct zmk_split_relay_event_payload relay_event;
+#endif
     } data;
 } __packed;

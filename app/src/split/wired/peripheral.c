@@ -320,6 +320,10 @@ static ssize_t get_payload_data_size(const struct zmk_split_transport_peripheral
         return sizeof(evt->data.battery_event);
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_HEART_BEAT_EVENT:
         return 0;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_RELAY_EVENT:
+        return sizeof(evt->data.relay_event);
+#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
     default:
         return -ENOTSUP;
     }
