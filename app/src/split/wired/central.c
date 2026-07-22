@@ -134,6 +134,7 @@ static K_TIMER_DEFINE(wired_central_read_timer, read_timer_cb, NULL);
 #endif
 
 static void begin_tx(void) {
+    // TODO: delay might be required for half-duplex uart to wait the line becomes stable
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_UART_MODE_INTERRUPT)
     uart_irq_tx_enable(uart);
 #elif IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_UART_MODE_ASYNC)
@@ -265,11 +266,13 @@ static void serial_cb(const struct device *dev, void *user_data) {
 
     while (uart_irq_update(dev) && uart_irq_is_pending(dev)) {
         if (uart_irq_rx_ready(dev)) {
-            zmk_split_wired_fifo_read(dev, &rx_buf, &publish_events, NULL);
 #if IS_HALF_DUPLEX_MODE
+            // Extend timeout since reading all data from fifo might take time if large data continuously arrives(?)
+            // The timeout is shortened in publish_events when all data read or rx_buf became full.
             k_work_reschedule(&rx_done_work,
-                              K_TICKS(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_COMPLETE_TIMEOUT));
+                              K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_PROCESS_TIMEOUT));
 #endif
+            zmk_split_wired_fifo_read(dev, &rx_buf, &publish_events, NULL);
         }
 
         if (uart_irq_tx_complete(dev)) {
