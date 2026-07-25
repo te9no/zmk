@@ -308,6 +308,12 @@ static void begin_tx(void) {
 #endif
 }
 
+#if IS_HALF_DUPLEX_MODE
+// Half-duplex only: the peripheral shares one line with the central, so it may
+// only drive TX in the window after a poll. begin_tx is therefore deferred and
+// debounced against the incoming poll. In full-duplex the peripheral owns its TX
+// line and sends immediately from split_peripheral_wired_report_event (its
+// begin_tx()), so none of this turnaround machinery is needed.
 static void begin_tx_work_cb(struct k_work *work);
 
 static K_WORK_DELAYABLE_DEFINE(begin_tx_work, begin_tx_work_cb);
@@ -324,6 +330,7 @@ static void begin_tx_work_cb(struct k_work *work) {
 
     begin_tx();
 }
+#endif // IS_HALF_DUPLEX_MODE
 
 static ssize_t get_payload_data_size(const struct zmk_split_transport_peripheral_event *evt) {
     switch (evt->type) {
@@ -505,13 +512,19 @@ static void process_tx_cb(void) {
             }
 
             if (env.payload.cmd.type == ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS) {
+                // Respond to the central's poll so it (and we) stay healthy: emit a
+                // heart-beat if we have been quiet, which also advances the central's
+                // last-response time. In full-duplex the heart-beat's report_event
+                // sends immediately; only half-duplex needs the debounced turnaround.
                 if (k_uptime_get_32() - last_send_event_ms >
                     DT_INST_PROP(0, heart_beat_interval_ms)) {
                     k_work_submit(&send_heart_beat_work);
                 }
 
+#if IS_HALF_DUPLEX_MODE
                 k_work_reschedule(&begin_tx_work,
                                   K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_TX_DEBOUNCE_TIMEOUT));
+#endif // IS_HALF_DUPLEX_MODE
             } else {
                 int ret = k_msgq_put(&cmd_msg_queue, &env.payload.cmd, K_NO_WAIT);
                 if (ret < 0) {

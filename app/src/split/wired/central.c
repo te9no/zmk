@@ -264,6 +264,40 @@ void rx_done_cb(struct k_work *work) {
     k_work_reschedule(&rx_done_work, K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_TIMEOUT));
 }
 
+#else // !IS_HALF_DUPLEX_MODE
+
+// Full-duplex has no request/response turnaround, but the peripheral still needs
+// to be polled: a POLL_EVENTS is what advances the peripheral's health (so its
+// transport becomes and stays available) and what prompts the heart-beats that
+// keep THIS side's health up. Only poll while USB-powered -- a wired-split
+// central runs off USB, and there is no point driving the bus otherwise.
+//
+// Poll faster than (health_check_interval - heart_beat_interval): the peripheral
+// only heart-beats when it has been quiet for heart_beat_interval, and that gap
+// is sampled at the poll rate, so the worst-case silence the central sees is
+// heart_beat_interval + poll_interval. Keeping that under health_check_interval
+// stops the central flapping to disconnected while idle.
+#define FULL_DUPLEX_POLL_INTERVAL_MS                                                                \
+    MAX(10, ((int)DT_INST_PROP(0, health_check_interval_ms) -                                       \
+             (int)DT_INST_PROP(0, heart_beat_interval_ms)) /                                        \
+                2)
+
+static void send_poll_work_cb(struct k_work *work) {
+    if (zmk_usb_get_conn_state() == ZMK_USB_CONN_NONE) {
+        return;
+    }
+    split_central_wired_send_command(
+        0, (struct zmk_split_transport_central_command){
+               .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS,
+           });
+}
+
+static K_WORK_DEFINE(send_poll_work, send_poll_work_cb);
+
+static void poll_timer_cb(struct k_timer *timer) { k_work_submit(&send_poll_work); }
+
+static K_TIMER_DEFINE(poll_timer, poll_timer_cb, NULL);
+
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_UART_MODE_INTERRUPT)
@@ -428,11 +462,16 @@ static int split_central_wired_set_enabled_internal(bool enabled) {
         begin_rx();
 #if IS_HALF_DUPLEX_MODE
         k_work_schedule(&rx_done_work, K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_TIMEOUT));
+#else
+        k_timer_start(&poll_timer, K_MSEC(FULL_DUPLEX_POLL_INTERVAL_MS),
+                      K_MSEC(FULL_DUPLEX_POLL_INTERVAL_MS));
 #endif
         return 0;
     } else {
 #if IS_HALF_DUPLEX_MODE
         k_work_cancel_delayable(&rx_done_work);
+#else
+        k_timer_stop(&poll_timer);
 #endif
         stop_rx();
         return 0;
