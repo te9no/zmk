@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <stdint.h>
 #include <proto/zmk/custom.pb.h>
 #include <zmk/event_manager.h>
 #include <zmk/studio/rpc.h>
@@ -102,16 +103,17 @@ bool zmk_rpc_custom_subsystem_encode_response_payload(pb_ostream_t *stream,
 #define ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(_subsystem_identifier, response_type)             \
     /** bufer */                                                                                   \
     static response_type zmk_rpc_custom_subsystem_response_buffer_##_subsystem_identifier;         \
-    /** sequence (pseudo) pointer for buffer usage tracking */                                     \
-    static void *zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier;             \
+    /** Monotonic token for response buffer usage tracking. */                                    \
+    static uintptr_t zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier;         \
                                                                                                    \
     static inline bool zmk_rpc_custom_subsystem_encode_response_##_subsystem_identifier(           \
         pb_ostream_t *stream, const pb_field_t *payload_field, void *const *arg) {                 \
-        const void *seq = (void *)*arg;                                                            \
+        const uintptr_t seq = (uintptr_t)*arg;                                                     \
         if (seq != zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier) {         \
-            LOG_DBG("response buffer is in use by other request: expected=%d current=%d",          \
-                    (int)seq,                                                                      \
-                    (int)zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier);    \
+            LOG_DBG("response buffer is in use by other request: expected=%lu current=%lu",       \
+                    (unsigned long)seq,                                                            \
+                    (unsigned long)                                                                \
+                        zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier);     \
             return false; /* buffer was used by others before encoding */                          \
         }                                                                                          \
         return zmk_rpc_custom_subsystem_encode_response_payload(                                   \
@@ -126,7 +128,7 @@ bool zmk_rpc_custom_subsystem_encode_response_payload(pb_ostream_t *stream,
             (response_type)response_type##_init_zero;                                              \
         encode_response->funcs.encode =                                                            \
             zmk_rpc_custom_subsystem_encode_response_##_subsystem_identifier;                      \
-        encode_response->arg =                                                                     \
+        encode_response->arg = (void *)                                                            \
             ++zmk_rpc_custom_subsystem_response_buffer_seq_##_subsystem_identifier;                \
         return &zmk_rpc_custom_subsystem_response_buffer_##_subsystem_identifier;                  \
     }

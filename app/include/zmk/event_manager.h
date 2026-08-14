@@ -109,6 +109,10 @@ struct zmk_relay_event_received {
 
 #include <zmk/split/transport/types.h>
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#include <zmk/split/central.h>
+#endif
+
 ZMK_EVENT_DECLARE(zmk_relay_event_received);
 
 /**
