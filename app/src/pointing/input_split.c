@@ -26,77 +26,109 @@ struct zis_entry {
 
 static const struct zis_entry proxy_inputs[] = {DT_INST_FOREACH_STATUS_OKAY(ZIS_ENTRY)};
 
-static uint16_t proxy_active_keys[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)]
-                                 [CONFIG_ZMK_INPUT_SPLIT_MAX_TRACKED_KEYS];
+struct tracked_key {
+    uint16_t code;
+    bool release_pending;
+};
 
-static int replace_active_key(size_t input, uint16_t find, uint16_t replace) {
-    for (size_t k = 0; k < CONFIG_ZMK_INPUT_SPLIT_MAX_TRACKED_KEYS; k++) {
-        if (proxy_active_keys[input][k] == find) {
-            proxy_active_keys[input][k] = replace;
+static struct tracked_key keys[ARRAY_SIZE(proxy_inputs)][CONFIG_ZMK_INPUT_SPLIT_MAX_TRACKED_KEYS];
+
+#ifdef CONFIG_INPUT_MODE_THREAD
+/* Serialize nonblocking queue insertion with its ledger update, including IRQ producers. */
+static struct k_spinlock keys_lock;
+#define LOCK_KEYS() k_spinlock_key_t lock_key = k_spin_lock(&keys_lock)
+#define UNLOCK_KEYS() k_spin_unlock(&keys_lock, lock_key)
+#else
+/* Synchronous delivery calls listeners inline and has no full queue. */
+#define LOCK_KEYS()
+#define UNLOCK_KEYS()
+#endif
+
+static void retry_releases(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(release_work, retry_releases);
+
+static int release_key(size_t i, struct tracked_key *key, bool sync) {
+    int ret = input_report(proxy_inputs[i].dev, INPUT_EV_KEY, key->code, 0, sync, K_NO_WAIT);
+    if (ret == 0) {
+        *key = (struct tracked_key){0};
+    } else {
+        key->release_pending = true;
+        k_work_schedule(&release_work, K_MSEC(10));
+    }
+    return ret;
+}
+
+static void retry_releases(struct k_work *work) {
+    for (size_t i = 0; i < ARRAY_SIZE(proxy_inputs); i++) {
+        for (size_t k = 0; k < ARRAY_SIZE(keys[i]); k++) {
+            LOCK_KEYS();
+            if (keys[i][k].release_pending) {
+                release_key(i, &keys[i][k], true);
+            }
+            UNLOCK_KEYS();
+        }
+    }
+}
+
+static int report_key(size_t i, uint16_t code, int32_t value, bool sync) {
+    struct tracked_key *slot = NULL;
+    for (size_t k = 0; k < ARRAY_SIZE(keys[i]); k++) {
+        if (keys[i][k].code == code) {
+            slot = &keys[i][k];
+            break;
+        }
+        if (!slot && !keys[i][k].code) {
+            slot = &keys[i][k];
+        }
+    }
+    if (!value && slot && slot->code) {
+        return release_key(i, slot, sync);
+    }
+    if (value && slot && slot->release_pending) {
+        /* Deliver the previous up before the next down whenever capacity permits. */
+        if (release_key(i, slot, true) < 0) {
+            /* The consumer still holds this key; it must stay down for the new press. */
+            slot->release_pending = false;
             return 0;
         }
     }
-
-    return -ENODEV;
+    int ret = input_report(proxy_inputs[i].dev, INPUT_EV_KEY, code, value, sync, K_NO_WAIT);
+    if (!ret && value && slot) {
+        slot->code = code;
+    }
+    return ret;
 }
 
 int zmk_input_split_report_peripheral_event(uint8_t reg, uint8_t type, uint16_t code, int32_t value,
                                             bool sync) {
-    LOG_DBG("Got peripheral event for %d!", reg);
     for (size_t i = 0; i < ARRAY_SIZE(proxy_inputs); i++) {
         if (reg == proxy_inputs[i].reg) {
-            if (type == INPUT_EV_KEY) {
-                uint16_t find, replace;
-
-                if (value) {
-                    find = 0;
-                    replace = code;
-                } else {
-                    find = code;
-                    replace = 0;
-                }
-
-                int ret = replace_active_key(i, find, replace);
-                if (ret < 0) {
-                    LOG_WRN("Failed to %s key %d", value ? "track pressed" : "untrack released",
-                            ret);
-                }
+            if (type != INPUT_EV_KEY || !code) {
+                return input_report(proxy_inputs[i].dev, type, code, value, sync, K_NO_WAIT);
             }
-            return input_report(proxy_inputs[i].dev, type, code, value, sync, K_NO_WAIT);
+            LOCK_KEYS();
+            int ret = report_key(i, code, value, sync);
+            UNLOCK_KEYS();
+            return ret;
         }
     }
-
     return -ENODEV;
 }
 
 int zmk_input_split_peripheral_disconnected(uint8_t reg) {
     for (size_t i = 0; i < ARRAY_SIZE(proxy_inputs); i++) {
-        if (reg == proxy_inputs[i].reg) {
-            uint16_t prev = 0;
-            for (size_t k = 0; k < CONFIG_ZMK_INPUT_SPLIT_MAX_TRACKED_KEYS; k++) {
-                if (proxy_active_keys[i][k] != 0) {
-                    if (prev != 0) {
-                        int ret = input_report(proxy_inputs[i].dev, INPUT_EV_KEY, prev, 0, false,
-                                               K_NO_WAIT);
-                        if (ret < 0) {
-                            LOG_WRN("Failed to report release event on disconnect (%d)", ret);
-                        }
-                    }
-
-                    prev = proxy_active_keys[i][k];
-                    proxy_active_keys[i][k] = 0;
-                }
-            }
-
-            if (prev != 0) {
-                int ret = input_report(proxy_inputs[i].dev, INPUT_EV_KEY, prev, 0, true, K_NO_WAIT);
-                if (ret < 0) {
-                    LOG_WRN("Failed to report release event on disconnect (%d)", ret);
-                }
+        if (reg != proxy_inputs[i].reg) {
+            continue;
+        }
+        LOCK_KEYS();
+        for (size_t k = 0; k < ARRAY_SIZE(keys[i]); k++) {
+            if (keys[i][k].code) {
+                release_key(i, &keys[i][k], true);
             }
         }
+        UNLOCK_KEYS();
+        return 0;
     }
-
     return -ENODEV;
 }
 

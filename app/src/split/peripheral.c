@@ -23,6 +23,7 @@
 #endif
 
 #include <zephyr/init.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -90,25 +91,7 @@ int zmk_split_peripheral_select_first_available_transport(void) {
     // available and fully connected.
     STRUCT_SECTION_FOREACH(zmk_split_transport_peripheral, t) {
         if (!t->api->get_status || t->api->get_status().available) {
-            if (active_peripheral_transport == t) {
-                LOG_DBG("First available is already selected, moving on");
-                return 0;
-            }
-
-            if (active_peripheral_transport && active_peripheral_transport->api->set_enabled) {
-                int err = active_peripheral_transport->api->set_enabled(false);
-                if (err < 0) {
-                    LOG_WRN("Error disabling previously selected split transport (%d)", err);
-                }
-            }
-
-            active_peripheral_transport = t;
-            int err = 0;
-            if (active_peripheral_transport->api->set_enabled) {
-                err = active_peripheral_transport->api->set_enabled(true);
-            }
-
-            return err;
+            return zmk_split_peripheral_select_transport(t);
         }
     }
 
@@ -116,23 +99,35 @@ int zmk_split_peripheral_select_first_available_transport(void) {
 }
 
 int zmk_split_peripheral_select_transport(const struct zmk_split_transport_peripheral *transport) {
+    static atomic_t selecting;
+    int err = 0;
+
+    if (!atomic_cas(&selecting, 0, 1)) {
+        return -EBUSY;
+    }
     if (active_peripheral_transport == transport) {
-        return 0;
+        goto done;
     }
 
     if (active_peripheral_transport && active_peripheral_transport->api->set_enabled) {
-        int err = active_peripheral_transport->api->set_enabled(false);
+        err = active_peripheral_transport->api->set_enabled(false);
         if (err < 0) {
             LOG_WRN("Error disabling previous split transport (%d)", err);
-            return err;
+            goto done;
         }
     }
 
-    active_peripheral_transport = transport;
-    if (active_peripheral_transport && active_peripheral_transport->api->set_enabled) {
-        return active_peripheral_transport->api->set_enabled(true);
+    active_peripheral_transport = NULL;
+    if (transport && transport->api->set_enabled) {
+        err = transport->api->set_enabled(true);
+        if (err) {
+            goto done;
+        }
     }
-    return 0;
+    active_peripheral_transport = transport;
+done:
+    atomic_clear(&selecting);
+    return err;
 }
 
 static int transport_status_changed_cb(const struct zmk_split_transport_peripheral *p,
