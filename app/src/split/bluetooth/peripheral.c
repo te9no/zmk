@@ -37,6 +37,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/split_peripheral_status_changed.h>
 #include <zmk/ble.h>
 #include <zmk/split/bluetooth/uuid.h>
+#include <zmk/bt_recovery_bridge.h>
 
 static const struct bt_data zmk_ble_ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -76,7 +77,9 @@ static bool low_duty_advertising = false;
 static bool enabled = false;
 
 static void advertising_cb(struct k_work *work) {
+    if (!enabled || is_connected) return;
     const int err = start_advertising(low_duty_advertising);
+    BT_RECOVERY(zmk_bt_recovery_result(err == -EALREADY ? 0 : err));
     if (err < 0) {
         LOG_ERR("Failed to start advertising (%d)", err);
     }
@@ -86,6 +89,7 @@ K_WORK_DEFINE(advertising_work, advertising_cb);
 
 static void connected(struct bt_conn *conn, uint8_t err) {
     is_connected = (err == 0);
+    BT_RECOVERY(zmk_bt_recovery_link(0, is_connected, err));
 
     raise_zmk_split_peripheral_status_changed(
         (struct zmk_split_peripheral_status_changed){.connected = is_connected});
@@ -111,6 +115,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     LOG_DBG("Disconnected from %s (reason 0x%02x)", addr, reason);
 
     is_connected = false;
+    BT_RECOVERY(zmk_bt_recovery_link(0, false, reason));
 
     raise_zmk_split_peripheral_status_changed(
         (struct zmk_split_peripheral_status_changed){.connected = is_connected});
@@ -173,6 +178,7 @@ static int split_peripheral_bt_set_enabled(bool en) {
     int err;
 
     enabled = en;
+    BT_RECOVERY(zmk_bt_recovery_enabled(en));
     if (en) {
         k_work_submit(&advertising_work);
         return 0;
@@ -197,6 +203,15 @@ static int split_peripheral_bt_set_enabled(bool en) {
 }
 
 static void notify_transport_status(void);
+
+#if IS_ENABLED(CONFIG_ZMK_BT_RECOVERY)
+int zmk_bt_recovery_retry(void) {
+    if (!enabled || is_connected || zmk_activity_get_state() == ZMK_ACTIVITY_SLEEP)
+        return -ECANCELED;
+    advertising_cb(NULL);
+    return 0;
+}
+#endif
 
 static void notify_status_work_cb(struct k_work *_work) { notify_transport_status(); }
 

@@ -5,6 +5,10 @@ mainmenu "ZMK Firmware"
 
 menu "ZMK"
 
+config ZMK_BT_RECOVERY_BRIDGE_V1
+    bool
+    default y
+
 config ZMK_BOARD_COMPAT
     bool
     help

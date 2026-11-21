@@ -35,6 +35,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
 
+#include <zmk/bt_recovery_bridge.h>
+
 #include "relay_event.h"
 
 static int start_scanning(void);
@@ -581,6 +583,11 @@ static uint8_t split_central_notify_func(struct bt_conn *conn,
     }
 
     LOG_DBG("[NOTIFICATION] data %p length %u", data, length);
+
+    if (length != POSITION_STATE_DATA_LEN) {
+        return BT_GATT_ITER_STOP;
+    }
+    BT_RECOVERY(zmk_bt_recovery_traffic(peripheral_slot_index_for_conn(conn)));
 
     for (int i = 0; i < POSITION_STATE_DATA_LEN; i++) {
         slot->changed_positions[i] = ((uint8_t *)data)[i] ^ slot->position_state[i];
@@ -1149,9 +1156,12 @@ static int start_scanning(void) {
     int err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, split_central_device_found);
     if (err < 0) {
         LOG_ERR("Scanning failed to start (err %d)", err);
+        is_scanning = false;
+        BT_RECOVERY(zmk_bt_recovery_result(err));
         return err;
     }
 
+    BT_RECOVERY(zmk_bt_recovery_result(0));
     LOG_DBG("Scanning successfully started");
     return 0;
 }
@@ -1168,6 +1178,12 @@ static void split_central_connected(struct bt_conn *conn, uint8_t conn_err) {
         LOG_DBG("SKIPPING FOR ROLE %d", info.role);
         return;
     }
+
+    int recovery_slot = peripheral_slot_index_for_conn(conn);
+    if (recovery_slot < 0) {
+        return;
+    }
+    BT_RECOVERY(zmk_bt_recovery_link(recovery_slot, conn_err == 0, conn_err));
 
     if (conn_err) {
         LOG_ERR("Failed to connect to %s (%u)", addr, conn_err);
@@ -1188,6 +1204,11 @@ static void split_central_connected(struct bt_conn *conn, uint8_t conn_err) {
 static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
     char addr[BT_ADDR_LE_STR_LEN];
     int err;
+    int slot_idx = peripheral_slot_index_for_conn(conn);
+    if (slot_idx < 0) {
+        return;
+    }
+    BT_RECOVERY(zmk_bt_recovery_link(slot_idx, false, reason));
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
@@ -1195,7 +1216,7 @@ static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     struct peripheral_event_wrapper ev = {
-        .source = peripheral_slot_index_for_conn(conn),
+        .source = slot_idx,
         .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT,
                   .data = {.battery_event = {
                                .level = 0,
@@ -1447,6 +1468,7 @@ static int split_central_bt_get_available_source_ids(uint8_t *sources) {
 
 static int split_central_bt_set_enabled(bool enabled) {
     is_enabled = enabled;
+    BT_RECOVERY(zmk_bt_recovery_enabled(enabled));
     if (enabled) {
         return start_scanning();
     } else {
@@ -1475,6 +1497,20 @@ split_central_bt_set_status_callback(zmk_split_transport_central_status_changed_
     transport_status_cb = cb;
     return 0;
 }
+
+#if IS_ENABLED(CONFIG_ZMK_BT_RECOVERY)
+int zmk_bt_recovery_retry(void) {
+    if (!is_enabled || is_scanning || zmk_activity_get_state() == ZMK_ACTIVITY_SLEEP) {
+        return -ECANCELED;
+    }
+    bool missing = false;
+    for (int i = 0; i < CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS; i++) {
+        if (peripherals[i].conn == NULL) missing = true;
+    }
+    if (!missing) return -ECANCELED;
+    return start_scanning();
+}
+#endif
 
 static struct zmk_split_transport_status split_central_bt_get_status() {
     uint8_t _source_ids[ZMK_SPLIT_BLE_PERIPHERAL_COUNT];

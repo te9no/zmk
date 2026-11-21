@@ -37,6 +37,9 @@ int zmk_split_transport_central_peripheral_event_handler(
         LOG_WRN("Ignoring peripheral event from non-active transport");
         return -EINVAL;
     }
+    if (source >= ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT) {
+        return -EINVAL;
+    }
     switch (ev.type) {
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_KEY_POSITION_EVENT: {
         struct zmk_position_state_changed state_ev = {.source = source,
