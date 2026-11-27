@@ -98,9 +98,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: central, shield: corne_left, config: recovery}
-          - {name: peripheral, shield: corne_right, config: recovery}
-          - {name: disabled, shield: corne_left, config: disabled}
+          - { name: central, shield: corne_left, config: recovery }
+          - { name: peripheral, shield: corne_right, config: recovery }
+          - { name: disabled, shield: corne_left, config: disabled }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,15 +117,16 @@ jobs:
         working-directory: ws
         run: |
           west init -l zmk/app
+          cd zmk
           west update --narrow
           west zephyr-export
       - name: Build nRF52840 (${{ matrix.name }})
         working-directory: ws/zmk
-        run: >
-          west build -s app -d build -b nice_nano//zmk --
-          -DSHIELD=${{ matrix.shield }}
-          -DZMK_EXTRA_MODULES=$GITHUB_WORKSPACE/module
-          -DEXTRA_CONF_FILE=$GITHUB_WORKSPACE/module/tests/smoke/${{ matrix.config }}.conf
+        run: |
+          west build -s app -d build -b nice_nano//zmk -- \
+            -DSHIELD=${{ matrix.shield }} \
+            -DZMK_EXTRA_MODULES=$GITHUB_WORKSPACE/module \
+            -DEXTRA_CONF_FILE=$GITHUB_WORKSPACE/module/tests/smoke/${{ matrix.config }}.conf
       - name: Check recovery configuration
         working-directory: ws/zmk/build/zephyr
         run: |
