@@ -1,0 +1,164 @@
+# Keep feat/cormoran-split-recovery (cormoran main+dya + BLE recovery bridge)
+# up to date. When cormoran main+dya moves, merge it into a sync branch, build
+# split firmware with zmk-module-bt-recovery enabled, and open a PR. A merge
+# conflict or build failure fails this workflow, so GitHub notifies the owner.
+# Keyboard configs keep pinning a reviewed SHA; bump them after merging the PR.
+name: Sync cormoran main+dya
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      build_current:
+        description: Build the current target branch even if it is up to date
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: sync-cormoran-dya
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/cormoran/zmk
+  UPSTREAM_BRANCH: main+dya
+  TARGET_BRANCH: feat/cormoran-split-recovery
+  RECOVERY_MODULE: te9no/zmk-module-bt-recovery
+  RECOVERY_MODULE_REF: 7e76381d90856a42e739cebf66752afebbe78748
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      build_ref: ${{ steps.merge.outputs.build_ref }}
+      sync_branch: ${{ steps.merge.outputs.sync_branch }}
+      upstream_sha: ${{ steps.merge.outputs.upstream_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+      - id: merge
+        name: Merge cormoran main+dya
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_CURRENT: ${{ inputs.build_current || false }}
+        run: |
+          set -eu
+          git fetch --no-tags "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH"
+          upstream=$(git rev-parse FETCH_HEAD)
+          echo "upstream_sha=$upstream" >> "$GITHUB_OUTPUT"
+          echo "cormoran $UPSTREAM_BRANCH: $upstream" >> "$GITHUB_STEP_SUMMARY"
+
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo "$TARGET_BRANCH already contains it." >> "$GITHUB_STEP_SUMMARY"
+            if [ "$BUILD_CURRENT" = "true" ]; then
+              echo "build_ref=$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          branch="sync/cormoran-dya-${upstream:0:12}"
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state all --json number --jq length)
+          if [ "$prs" != "0" ]; then
+            echo "A PR for $branch already exists; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          if ! git merge --no-ff --no-edit -m "Merge cormoran $UPSTREAM_BRANCH ${upstream:0:12}" "$upstream"; then
+            {
+              echo "### Merge conflict"
+              echo "Resolve by hand: merge $upstream into $TARGET_BRANCH."
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git push --force origin "$branch"
+          echo "sync_branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "build_ref=$branch" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: merge
+    if: needs.merge.outputs.build_ref != ''
+    runs-on: ubuntu-latest
+    container: docker.io/zmkfirmware/zmk-build-arm:4.1
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: central, shield: corne_left, config: recovery}
+          - {name: peripheral, shield: corne_right, config: recovery}
+          - {name: disabled, shield: corne_left, config: disabled}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.merge.outputs.build_ref }}
+          path: ws/zmk
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RECOVERY_MODULE }}
+          ref: ${{ env.RECOVERY_MODULE_REF }}
+          path: module
+          persist-credentials: false
+      - name: West update
+        working-directory: ws
+        run: |
+          west init -l zmk/app
+          west update --narrow
+          west zephyr-export
+      - name: Build nRF52840 (${{ matrix.name }})
+        working-directory: ws/zmk
+        run: >
+          west build -s app -d build -b nice_nano//zmk --
+          -DSHIELD=${{ matrix.shield }}
+          -DZMK_EXTRA_MODULES=$GITHUB_WORKSPACE/module
+          -DEXTRA_CONF_FILE=$GITHUB_WORKSPACE/module/tests/smoke/${{ matrix.config }}.conf
+      - name: Check recovery configuration
+        working-directory: ws/zmk/build/zephyr
+        run: |
+          if [ "${{ matrix.config }}" = recovery ]; then
+            grep -x 'CONFIG_ZMK_BT_RECOVERY=y' .config
+            grep -x 'CONFIG_ZMK_BT_RECOVERY_BRIDGE_V1=y' .config
+          else
+            ! grep -x 'CONFIG_ZMK_BT_RECOVERY=y' .config
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-build
+          path: |
+            ws/zmk/build/zephyr/zmk.uf2
+            ws/zmk/build/zephyr/.config
+
+  pr:
+    needs: [merge, build]
+    if: needs.merge.outputs.sync_branch != ''
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.merge.outputs.sync_branch }}
+          UPSTREAM_SHA: ${{ needs.merge.outputs.upstream_sha }}
+        run: |
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$TARGET_BRANCH" --head "$BRANCH" \
+            --title "Merge cormoran $UPSTREAM_BRANCH ${UPSTREAM_SHA:0:12}" \
+            --body "Automated merge of $UPSTREAM_URL/commit/$UPSTREAM_SHA into \`$TARGET_BRANCH\`.
+
+          Merged without conflicts. corne_left/corne_right (nice_nano//zmk) built with zmk-module-bt-recovery \`${RECOVERY_MODULE_REF:0:7}\` enabled, plus a recovery-disabled build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Not tested on hardware. Review the bridge hooks in \`app/src/split/bluetooth/\` if cormoran changed them, then merge and bump keyboard config pins."
